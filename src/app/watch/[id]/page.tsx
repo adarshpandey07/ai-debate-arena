@@ -19,6 +19,66 @@ interface Room {
   activeSide: "for" | "against" | null;
 }
 
+let ttsActive = true;
+let voiceFor: SpeechSynthesisVoice | null = null;
+let voiceAgainst: SpeechSynthesisVoice | null = null;
+let voicesLoaded = false;
+
+function loadVoices() {
+  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length === 0) return;
+
+  voiceFor =
+    voices.find((v) => v.name.includes("Daniel")) ||
+    voices.find((v) => v.name.includes("Aaron")) ||
+    voices.find((v) => v.lang.startsWith("en") && v.name.toLowerCase().includes("male")) ||
+    voices.find((v) => v.lang.startsWith("en")) ||
+    voices[0];
+
+  voiceAgainst =
+    voices.find((v) => v.name.includes("Samantha")) ||
+    voices.find((v) => v.name.includes("Karen")) ||
+    voices.find((v) => v.name.includes("Fiona")) ||
+    voices.find((v) => v.lang.startsWith("en") && v !== voiceFor) ||
+    voices[1] ||
+    voices[0];
+
+  voicesLoaded = true;
+}
+
+function speakText(text: string, side: "for" | "against"): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || !window.speechSynthesis || !ttsActive) {
+      resolve();
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    if (!voicesLoaded) loadVoices();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.voice = side === "for" ? voiceFor : voiceAgainst;
+    utterance.rate = 1.1;
+    utterance.pitch = side === "for" ? 0.85 : 1.15;
+    utterance.volume = 1;
+
+    utterance.onend = () => resolve();
+    utterance.onerror = () => resolve();
+
+    setTimeout(() => {
+      if (!ttsActive) { resolve(); return; }
+      window.speechSynthesis.speak(utterance);
+    }, 150);
+  });
+}
+
+function stopSpeaking() {
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+  }
+}
+
 export default function WatchPage() {
   const params = useParams();
   const roomId = params.id as string;
@@ -26,8 +86,17 @@ export default function WatchPage() {
   const [error, setError] = useState("");
   const [hasVoted, setHasVoted] = useState(false);
   const [voterId] = useState(() => Math.random().toString(36).substring(2, 10));
+  const [ttsEnabled, setTtsEnabled] = useState(true);
   const debateRef = useRef<HTMLDivElement>(null);
-  const [prevMessageCount, setPrevMessageCount] = useState(0);
+  const spokenCountRef = useRef(0);
+
+  // Load and cache voices on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = () => loadVoices();
+    }
+  }, []);
 
   const fetchRoom = useCallback(async () => {
     try {
@@ -43,22 +112,35 @@ export default function WatchPage() {
     }
   }, [roomId]);
 
-  // Poll every 2 seconds
+  // Poll every 1.5 seconds
   useEffect(() => {
     fetchRoom();
-    const interval = setInterval(fetchRoom, 2000);
+    const interval = setInterval(fetchRoom, 1500);
     return () => clearInterval(interval);
   }, [fetchRoom]);
 
-  // Auto-scroll when new messages arrive
+  // Auto-scroll + TTS when new messages arrive
   useEffect(() => {
-    if (room && room.messages.length > prevMessageCount) {
-      setPrevMessageCount(room.messages.length);
-      if (debateRef.current) {
-        debateRef.current.scrollTop = debateRef.current.scrollHeight;
-      }
+    if (!room) return;
+
+    if (debateRef.current) {
+      debateRef.current.scrollTop = debateRef.current.scrollHeight;
     }
-  }, [room, prevMessageCount]);
+
+    // Speak new messages
+    if (ttsActive && room.messages.length > spokenCountRef.current) {
+      const newMessages = room.messages.slice(spokenCountRef.current);
+      spokenCountRef.current = room.messages.length;
+
+      (async () => {
+        for (const msg of newMessages) {
+          await speakText(msg.content, msg.side);
+        }
+      })();
+    } else if (!ttsActive && room.messages.length > spokenCountRef.current) {
+      spokenCountRef.current = room.messages.length;
+    }
+  }, [room]);
 
   const castVote = async (side: "for" | "against") => {
     if (hasVoted) return;
@@ -120,6 +202,21 @@ export default function WatchPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                const newVal = !ttsEnabled;
+                setTtsEnabled(newVal);
+                ttsActive = newVal;
+                if (!newVal) stopSpeaking();
+              }}
+              className={`px-3 py-1.5 text-xs border rounded-lg transition-colors ${
+                ttsEnabled
+                  ? "bg-green-500/20 text-green-400 border-green-500/30"
+                  : "bg-zinc-800 text-zinc-500 border-white/10"
+              }`}
+            >
+              {ttsEnabled ? "🔊" : "🔇"}
+            </button>
             <span className="relative flex h-2.5 w-2.5">
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500"></span>
@@ -137,9 +234,9 @@ export default function WatchPage() {
           <h2 className="text-xl font-bold text-zinc-200">&ldquo;{room.topic}&rdquo;</h2>
           {room.status === "debating" && (
             <div className="flex items-center justify-center gap-2 mt-2">
-              <span className="text-xs text-zinc-500">Round {room.currentRound} of 4</span>
+              <span className="text-xs text-zinc-500">Round {room.currentRound} of 3</span>
               <div className="flex gap-1">
-                {Array.from({ length: 4 }).map((_, i) => (
+                {Array.from({ length: 3 }).map((_, i) => (
                   <div
                     key={i}
                     className={`w-2 h-2 rounded-full transition-colors ${
@@ -217,7 +314,7 @@ export default function WatchPage() {
                     {msg.side === "for" ? "🛡️ Agent Alpha" : "⚔️ Agent Omega"} · Round {msg.round}
                   </span>
                 </div>
-                <p className="text-sm leading-relaxed text-zinc-300 whitespace-pre-wrap">{msg.content}</p>
+                <p className="text-base leading-relaxed text-zinc-200 whitespace-pre-wrap">{msg.content}</p>
               </div>
             </div>
           ))}
@@ -262,9 +359,7 @@ export default function WatchPage() {
               </button>
             </div>
             {hasVoted && (
-              <p className="text-center text-sm text-purple-400 mt-4">
-                Vote cast! Waiting for results...
-              </p>
+              <p className="text-center text-sm text-purple-400 mt-4">Vote cast! Waiting for results...</p>
             )}
           </div>
         )}
