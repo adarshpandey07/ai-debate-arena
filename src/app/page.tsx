@@ -17,7 +17,78 @@ const SUGGESTED_TOPICS = [
   "University education is no longer worth it",
 ];
 
-const MAX_ROUNDS = 4;
+const MAX_ROUNDS = 3;
+
+// Module-level TTS state — avoids React closure issues
+let ttsActive = true;
+let voiceFor: SpeechSynthesisVoice | null = null;
+let voiceAgainst: SpeechSynthesisVoice | null = null;
+let voicesLoaded = false;
+
+function loadVoices() {
+  if (typeof window === "undefined" || !window.speechSynthesis) return;
+  const voices = window.speechSynthesis.getVoices();
+  if (voices.length === 0) return;
+
+  voiceFor =
+    voices.find((v) => v.name.includes("Daniel")) ||
+    voices.find((v) => v.name.includes("Aaron")) ||
+    voices.find((v) => v.lang.startsWith("en") && v.name.toLowerCase().includes("male")) ||
+    voices.find((v) => v.lang.startsWith("en")) ||
+    voices[0];
+
+  voiceAgainst =
+    voices.find((v) => v.name.includes("Samantha")) ||
+    voices.find((v) => v.name.includes("Karen")) ||
+    voices.find((v) => v.name.includes("Fiona")) ||
+    voices.find((v) => v.lang.startsWith("en") && v !== voiceFor) ||
+    voices[1] ||
+    voices[0];
+
+  voicesLoaded = true;
+  console.log("Voices loaded:", voiceFor?.name, "vs", voiceAgainst?.name);
+}
+
+function speakText(text: string, side: "for" | "against"): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window === "undefined" || !window.speechSynthesis) {
+      resolve();
+      return;
+    }
+
+    if (!ttsActive) {
+      resolve();
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+
+    if (!voicesLoaded) loadVoices();
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.voice = side === "for" ? voiceFor : voiceAgainst;
+    utterance.rate = 1.1;
+    utterance.pitch = side === "for" ? 0.85 : 1.15;
+    utterance.volume = 1;
+
+    utterance.onend = () => resolve();
+    utterance.onerror = () => resolve();
+
+    setTimeout(() => {
+      if (!ttsActive) {
+        resolve();
+        return;
+      }
+      window.speechSynthesis.speak(utterance);
+    }, 150);
+  });
+}
+
+function stopSpeaking() {
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    window.speechSynthesis.cancel();
+  }
+}
 
 export default function Home() {
   const [topic, setTopic] = useState("");
@@ -29,11 +100,21 @@ export default function Home() {
   const [votes, setVotes] = useState({ for: 0, against: 0 });
   const [hasVoted, setHasVoted] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [showSharePanel, setShowSharePanel] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [ttsEnabled, setTtsEnabled] = useState(true);
   const debateRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Load and cache voices on mount
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = () => loadVoices();
+    }
+  }, []);
 
   // Auto-scroll to bottom of debate
   useEffect(() => {
@@ -56,7 +137,6 @@ export default function Home() {
     }
   }, [phase, roomId]);
 
-  // Sync room status to server
   const syncRoomStatus = useCallback(
     async (status: string, side: string | null = null) => {
       if (!roomId) return;
@@ -69,7 +149,6 @@ export default function Home() {
     [roomId]
   );
 
-  // Sync message to server
   const syncMessage = useCallback(
     async (message: DebateMessage, round: number, side: "for" | "against" | null) => {
       if (!roomId) return;
@@ -121,7 +200,6 @@ export default function Home() {
   const runDebate = useCallback(async () => {
     if (!topic.trim()) return;
 
-    // Create room on server
     const res = await fetch("/api/rooms", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -142,14 +220,13 @@ export default function Home() {
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       setCurrentRound(round);
 
-      // Sync active side to server
+      // --- FOR side ---
       await fetch("/api/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "status", roomId: room.id, status: "debating", activeSide: "for" }),
       });
 
-      // FOR side speaks
       const forHistory =
         round === 1
           ? []
@@ -164,19 +241,24 @@ export default function Home() {
       setMessages([...allMessages]);
       setStreamingText("");
 
-      // Sync message to server
       await syncMessage(forMsg, round, "for");
 
-      await new Promise((r) => setTimeout(r, 800));
+      // TTS — speak the message and WAIT for it to finish
+      if (ttsActive) {
+        setIsSpeaking(true);
+        await speakText(forText, "for");
+        setIsSpeaking(false);
+      }
 
-      // Sync active side
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // --- AGAINST side ---
       await fetch("/api/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "status", roomId: room.id, status: "debating", activeSide: "against" }),
       });
 
-      // AGAINST side speaks
       const againstHistory = allMessages.map((m) => ({
         role: m.side === "against" ? "assistant" : "user",
         content: m.content,
@@ -188,24 +270,29 @@ export default function Home() {
       setMessages([...allMessages]);
       setStreamingText("");
 
-      // Sync message to server
       await syncMessage(againstMsg, round, "against");
 
+      // TTS — speak and wait
+      if (ttsActive) {
+        setIsSpeaking(true);
+        await speakText(againstText, "against");
+        setIsSpeaking(false);
+      }
+
       if (round < MAX_ROUNDS) {
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 2000));
       }
     }
 
     setActiveSide(null);
     setPhase("voting");
 
-    // Sync voting status to server
     await fetch("/api/rooms", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "status", roomId: room.id, status: "voting", activeSide: null }),
     });
-  }, [topic, streamResponse, syncMessage]);
+  }, [topic, streamResponse, syncMessage, ttsEnabled]);
 
   const castVote = async (side: "for" | "against") => {
     if (hasVoted || !roomId) return;
@@ -217,7 +304,6 @@ export default function Home() {
       body: JSON.stringify({ action: "vote", roomId, side, voterId: "host" }),
     });
 
-    // Fetch updated votes
     const res = await fetch(`/api/rooms?id=${roomId}`);
     if (res.ok) {
       const room = await res.json();
@@ -233,6 +319,7 @@ export default function Home() {
   };
 
   const resetDebate = () => {
+    stopSpeaking();
     setPhase("setup");
     setTopic("");
     setMessages([]);
@@ -243,6 +330,7 @@ export default function Home() {
     setHasVoted(false);
     setRoomId(null);
     setShowSharePanel(false);
+    setIsSpeaking(false);
     if (abortRef.current) abortRef.current.abort();
   };
 
@@ -275,6 +363,23 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            {phase !== "setup" && (
+              <button
+                onClick={() => {
+                  const newVal = !ttsEnabled;
+                  setTtsEnabled(newVal);
+                  ttsActive = newVal;
+                  if (!newVal) stopSpeaking();
+                }}
+                className={`px-3 py-1.5 text-xs border rounded-lg transition-colors ${
+                  ttsEnabled
+                    ? "bg-green-500/20 text-green-400 border-green-500/30"
+                    : "bg-zinc-800 text-zinc-500 border-white/10"
+                }`}
+              >
+                {ttsEnabled ? "🔊 Audio ON" : "🔇 Audio OFF"}
+              </button>
+            )}
             {roomId && (
               <button
                 onClick={() => setShowSharePanel(!showSharePanel)}
@@ -392,6 +497,9 @@ export default function Home() {
                     />
                   ))}
                 </div>
+                {isSpeaking && (
+                  <span className="text-xs text-purple-400 ml-2 animate-pulse">🔊 Speaking...</span>
+                )}
               </div>
             )}
           </div>
@@ -410,8 +518,10 @@ export default function Home() {
                 <p className="font-semibold text-blue-400">Agent Alpha</p>
                 <p className="text-xs text-zinc-500">Arguing FOR</p>
               </div>
-              {activeSide === "for" && isStreaming && (
-                <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full">Speaking...</span>
+              {activeSide === "for" && (isStreaming || isSpeaking) && (
+                <span className="text-xs bg-blue-500/20 text-blue-400 px-2 py-0.5 rounded-full">
+                  {isStreaming ? "Thinking..." : "Speaking..."}
+                </span>
               )}
             </div>
 
@@ -420,8 +530,10 @@ export default function Home() {
             </div>
 
             <div className="flex items-center gap-3 justify-end">
-              {activeSide === "against" && isStreaming && (
-                <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full">Speaking...</span>
+              {activeSide === "against" && (isStreaming || isSpeaking) && (
+                <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full">
+                  {isStreaming ? "Thinking..." : "Speaking..."}
+                </span>
               )}
               <div className="text-right">
                 <p className="font-semibold text-red-400">Agent Omega</p>
@@ -458,7 +570,7 @@ export default function Home() {
                       {msg.side === "for" ? "🛡️ Agent Alpha" : "⚔️ Agent Omega"} · Round {msg.round}
                     </span>
                   </div>
-                  <p className="text-sm leading-relaxed text-zinc-300 whitespace-pre-wrap">{msg.content}</p>
+                  <p className="text-base leading-relaxed text-zinc-200 whitespace-pre-wrap">{msg.content}</p>
                 </div>
               </div>
             ))}
@@ -480,7 +592,7 @@ export default function Home() {
                       {activeSide === "for" ? "🛡️ Agent Alpha" : "⚔️ Agent Omega"} · Round {currentRound}
                     </span>
                   </div>
-                  <p className="text-sm leading-relaxed text-zinc-300 whitespace-pre-wrap">
+                  <p className="text-base leading-relaxed text-zinc-200 whitespace-pre-wrap">
                     {streamingText}
                     <span className="cursor-blink" />
                   </p>
