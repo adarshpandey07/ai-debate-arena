@@ -29,6 +29,9 @@ export default function Home() {
   const [votes, setVotes] = useState({ for: 0, against: 0 });
   const [hasVoted, setHasVoted] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [roomId, setRoomId] = useState<string | null>(null);
+  const [showSharePanel, setShowSharePanel] = useState(false);
+  const [copied, setCopied] = useState(false);
   const debateRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -38,6 +41,46 @@ export default function Home() {
       debateRef.current.scrollTop = debateRef.current.scrollHeight;
     }
   }, [messages, streamingText]);
+
+  // Poll votes from server when in voting phase
+  useEffect(() => {
+    if ((phase === "voting" || phase === "results") && roomId) {
+      const interval = setInterval(async () => {
+        const res = await fetch(`/api/rooms?id=${roomId}`);
+        if (res.ok) {
+          const room = await res.json();
+          setVotes(room.votes);
+        }
+      }, 2000);
+      return () => clearInterval(interval);
+    }
+  }, [phase, roomId]);
+
+  // Sync room status to server
+  const syncRoomStatus = useCallback(
+    async (status: string, side: string | null = null) => {
+      if (!roomId) return;
+      await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "status", roomId, status, activeSide: side }),
+      });
+    },
+    [roomId]
+  );
+
+  // Sync message to server
+  const syncMessage = useCallback(
+    async (message: DebateMessage, round: number, side: "for" | "against" | null) => {
+      if (!roomId) return;
+      await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "message", roomId, message, currentRound: round, activeSide: side }),
+      });
+    },
+    [roomId]
+  );
 
   const streamResponse = useCallback(
     async (side: "for" | "against", history: { role: string; content: string }[]) => {
@@ -77,16 +120,34 @@ export default function Home() {
 
   const runDebate = useCallback(async () => {
     if (!topic.trim()) return;
+
+    // Create room on server
+    const res = await fetch("/api/rooms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "create", topic }),
+    });
+    const room = await res.json();
+    setRoomId(room.id);
+
     setPhase("debating");
     setMessages([]);
     setCurrentRound(1);
     setVotes({ for: 0, against: 0 });
     setHasVoted(false);
+    setShowSharePanel(true);
 
     const allMessages: DebateMessage[] = [];
 
     for (let round = 1; round <= MAX_ROUNDS; round++) {
       setCurrentRound(round);
+
+      // Sync active side to server
+      await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "status", roomId: room.id, status: "debating", activeSide: "for" }),
+      });
 
       // FOR side speaks
       const forHistory =
@@ -103,8 +164,17 @@ export default function Home() {
       setMessages([...allMessages]);
       setStreamingText("");
 
-      // Small pause between speakers
+      // Sync message to server
+      await syncMessage(forMsg, round, "for");
+
       await new Promise((r) => setTimeout(r, 800));
+
+      // Sync active side
+      await fetch("/api/rooms", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "status", roomId: room.id, status: "debating", activeSide: "against" }),
+      });
 
       // AGAINST side speaks
       const againstHistory = allMessages.map((m) => ({
@@ -118,7 +188,9 @@ export default function Home() {
       setMessages([...allMessages]);
       setStreamingText("");
 
-      // Pause between rounds
+      // Sync message to server
+      await syncMessage(againstMsg, round, "against");
+
       if (round < MAX_ROUNDS) {
         await new Promise((r) => setTimeout(r, 1000));
       }
@@ -126,19 +198,38 @@ export default function Home() {
 
     setActiveSide(null);
     setPhase("voting");
-  }, [topic, streamResponse]);
 
-  const castVote = (side: "for" | "against") => {
-    if (hasVoted) return;
+    // Sync voting status to server
+    await fetch("/api/rooms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "status", roomId: room.id, status: "voting", activeSide: null }),
+    });
+  }, [topic, streamResponse, syncMessage]);
+
+  const castVote = async (side: "for" | "against") => {
+    if (hasVoted || !roomId) return;
     setHasVoted(true);
-    setVotes((prev) => ({ ...prev, [side]: prev[side] + 1 }));
-    // Simulate some audience votes
-    const simFor = side === "for" ? Math.floor(Math.random() * 30) + 35 : Math.floor(Math.random() * 25) + 15;
-    const simAgainst = side === "against" ? Math.floor(Math.random() * 30) + 35 : Math.floor(Math.random() * 25) + 15;
-    setTimeout(() => {
-      setVotes({ for: simFor, against: simAgainst });
-      setPhase("results");
-    }, 1500);
+
+    await fetch("/api/rooms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "vote", roomId, side, voterId: "host" }),
+    });
+
+    // Fetch updated votes
+    const res = await fetch(`/api/rooms?id=${roomId}`);
+    if (res.ok) {
+      const room = await res.json();
+      setVotes(room.votes);
+    }
+  };
+
+  const showResults = async () => {
+    setPhase("results");
+    if (roomId) {
+      await syncRoomStatus("results");
+    }
   };
 
   const resetDebate = () => {
@@ -150,13 +241,26 @@ export default function Home() {
     setCurrentRound(1);
     setVotes({ for: 0, against: 0 });
     setHasVoted(false);
+    setRoomId(null);
+    setShowSharePanel(false);
     if (abortRef.current) abortRef.current.abort();
+  };
+
+  const copyLink = () => {
+    const url = `${window.location.origin}/watch/${roomId}`;
+    navigator.clipboard.writeText(url);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const totalVotes = votes.for + votes.against;
   const forPercent = totalVotes > 0 ? Math.round((votes.for / totalVotes) * 100) : 50;
   const againstPercent = totalVotes > 0 ? Math.round((votes.against / totalVotes) * 100) : 50;
   const winner = votes.for > votes.against ? "for" : votes.against > votes.for ? "against" : "tie";
+  const watchUrl = roomId ? `${typeof window !== "undefined" ? window.location.origin : ""}/watch/${roomId}` : "";
+  const qrUrl = roomId
+    ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(watchUrl)}`
+    : "";
 
   return (
     <main className="min-h-screen flex flex-col">
@@ -170,16 +274,56 @@ export default function Home() {
               <p className="text-xs text-zinc-500">Two AIs. One topic. No mercy.</p>
             </div>
           </div>
-          {phase !== "setup" && (
-            <button
-              onClick={resetDebate}
-              className="px-4 py-2 text-sm border border-white/10 rounded-lg hover:bg-white/5 transition-colors"
-            >
-              New Debate
-            </button>
-          )}
+          <div className="flex items-center gap-3">
+            {roomId && (
+              <button
+                onClick={() => setShowSharePanel(!showSharePanel)}
+                className="px-3 py-1.5 text-xs bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded-lg hover:bg-purple-500/30 transition-colors"
+              >
+                Share Room: {roomId}
+              </button>
+            )}
+            {phase !== "setup" && (
+              <button
+                onClick={resetDebate}
+                className="px-4 py-2 text-sm border border-white/10 rounded-lg hover:bg-white/5 transition-colors"
+              >
+                New Debate
+              </button>
+            )}
+          </div>
         </div>
       </header>
+
+      {/* Share Panel */}
+      {showSharePanel && roomId && (
+        <div className="bg-[#12121a] border-b border-white/10 px-6 py-4 fade-in">
+          <div className="max-w-6xl mx-auto flex items-center gap-6">
+            <img
+              src={qrUrl}
+              alt="QR Code"
+              className="w-24 h-24 rounded-lg bg-white p-1"
+            />
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-zinc-300 mb-1">Audience can join by scanning the QR code or visiting:</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 px-3 py-2 bg-[#1a1a2e] border border-white/10 rounded-lg text-sm text-purple-400 truncate">
+                  {watchUrl}
+                </code>
+                <button
+                  onClick={copyLink}
+                  className="px-4 py-2 bg-purple-600 text-white text-sm rounded-lg hover:bg-purple-500 transition-colors whitespace-nowrap"
+                >
+                  {copied ? "Copied!" : "Copy Link"}
+                </button>
+              </div>
+              <p className="text-xs text-zinc-500 mt-2">
+                Room Code: <span className="font-mono font-bold text-zinc-300">{roomId}</span> · {totalVotes} viewer{totalVotes !== 1 ? "s have" : " has"} voted
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Setup Phase */}
       {phase === "setup" && (
@@ -294,7 +438,7 @@ export default function Home() {
           </div>
 
           {/* Debate Messages */}
-          <div ref={debateRef} className="flex-1 overflow-y-auto space-y-4 mb-6 min-h-0" style={{ maxHeight: "calc(100vh - 380px)" }}>
+          <div ref={debateRef} className="flex-1 overflow-y-auto space-y-4 mb-6 min-h-0" style={{ maxHeight: "calc(100vh - 420px)" }}>
             {messages.map((msg, idx) => (
               <div
                 key={idx}
@@ -350,7 +494,10 @@ export default function Home() {
             <div className="border-t border-white/10 pt-6 fade-in">
               <div className="text-center mb-5">
                 <h3 className="text-xl font-bold mb-1">The debate has ended!</h3>
-                <p className="text-zinc-400 text-sm">Cast your vote — who argued better?</p>
+                <p className="text-zinc-400 text-sm">Cast your vote — audience is voting too!</p>
+                {totalVotes > 0 && (
+                  <p className="text-xs text-purple-400 mt-1">{totalVotes} vote{totalVotes !== 1 ? "s" : ""} received</p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-4 max-w-lg mx-auto">
                 <button
@@ -380,11 +527,14 @@ export default function Home() {
                   <span className="block text-xs text-zinc-500 mt-1">AGAINST the topic</span>
                 </button>
               </div>
-              {hasVoted && (
-                <p className="text-center text-sm text-zinc-500 mt-4">
-                  Tallying audience votes...
-                </p>
-              )}
+              <div className="text-center mt-4">
+                <button
+                  onClick={showResults}
+                  className="px-6 py-2 bg-gradient-to-r from-purple-600 to-blue-600 rounded-lg text-sm font-semibold hover:opacity-90 transition-opacity"
+                >
+                  End Voting & Show Results
+                </button>
+              </div>
             </div>
           )}
 
@@ -403,7 +553,6 @@ export default function Home() {
               </div>
 
               <div className="max-w-lg mx-auto">
-                {/* Vote bar */}
                 <div className="flex items-center gap-3 mb-4">
                   <span className="text-blue-400 font-bold text-lg w-12 text-right">{forPercent}%</span>
                   <div className="flex-1 h-4 bg-zinc-800 rounded-full overflow-hidden flex">
