@@ -1,24 +1,64 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createRoom, getRoom } from "@/lib/rooms";
 
-// POST - create room | GET - fetch room by ?id=
+export const runtime = "edge";
+
+// Inline storage for Edge Runtime — more persistent than Node.js serverless
+interface DebateMessage {
+  side: "for" | "against";
+  content: string;
+  round: number;
+}
+
+interface Room {
+  id: string;
+  topic: string;
+  messages: DebateMessage[];
+  status: "debating" | "voting" | "results";
+  votes: { for: number; against: number };
+  voterIds: string[];
+  currentRound: number;
+  activeSide: "for" | "against" | null;
+  createdAt: number;
+}
+
+// Global Map persists across invocations in Edge Runtime isolates
+const rooms = new Map<string, Room>();
+
+function createRoom(topic: string): Room {
+  const id = Math.random().toString(36).substring(2, 8).toUpperCase();
+  const room: Room = {
+    id,
+    topic,
+    messages: [],
+    status: "debating",
+    votes: { for: 0, against: 0 },
+    voterIds: [],
+    currentRound: 1,
+    activeSide: null,
+    createdAt: Date.now(),
+  };
+  rooms.set(id, room);
+  return room;
+}
+
+function getRoom(id: string): Room | undefined {
+  return rooms.get(id.toUpperCase());
+}
+
 export async function POST(req: NextRequest) {
   const { action, roomId, ...data } = await req.json();
 
-  // CREATE ROOM
   if (action === "create") {
     const room = createRoom(data.topic);
     return NextResponse.json(room);
   }
 
-  // GET ROOM STATE
   if (action === "get") {
     const room = getRoom(roomId);
     if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
     return NextResponse.json(room);
   }
 
-  // ADD MESSAGE
   if (action === "message") {
     const room = getRoom(roomId);
     if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -28,7 +68,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // UPDATE STATUS
   if (action === "status") {
     const room = getRoom(roomId);
     if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -37,7 +76,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
-  // VOTE
   if (action === "vote") {
     const room = getRoom(roomId);
     if (!room) return NextResponse.json({ error: "Room not found" }, { status: 404 });
@@ -53,7 +91,6 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ error: "Unknown action" }, { status: 400 });
 }
 
-// GET route for polling
 export async function GET(req: NextRequest) {
   const roomId = req.nextUrl.searchParams.get("id");
   if (!roomId) return NextResponse.json({ error: "Missing id" }, { status: 400 });
