@@ -16,10 +16,11 @@ Your debate style:
 - Be sharp, witty, and persuasive
 - Use compelling arguments, facts, statistics, and rhetorical techniques
 - Directly counter your opponent's points when they make them
-- Keep each response to 2-3 paragraphs maximum
+- Keep each response to 1-2 short paragraphs (MAX 80 words total) — brevity is power
 - Be passionate but respectful
 - Use occasional rhetorical questions for dramatic effect
 - End with a strong punch line or memorable statement
+- Your response will be read aloud, so write in a natural spoken style
 
 You are arguing ${side === "for" ? "IN FAVOR OF" : "AGAINST"} the topic. Stay consistent with your position no matter what.`;
 
@@ -50,7 +51,7 @@ You are arguing ${side === "for" ? "IN FAVOR OF" : "AGAINST"} the topic. Stay co
     async start(controller) {
       const response = await client.messages.create({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 600,
+        max_tokens: 300,
         system: systemPrompt,
         messages,
         stream: true,
