@@ -437,6 +437,19 @@ export default function Home() {
           )}
         </div>
       )}
+
+      {/* Footer */}
+      <footer className="border-t border-white/10 px-6 py-4 mt-auto">
+        <div className="max-w-6xl mx-auto flex items-center justify-between">
+          <p className="text-xs text-zinc-500">
+            Built by{" "}
+            <span className="text-zinc-300 font-semibold">Adarsh Pandey</span>
+          </p>
+          <p className="text-xs text-zinc-600">
+            Powered by Claude AI
+          </p>
+        </div>
+      </footer>
     </main>
   );
 }
